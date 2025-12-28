@@ -1,0 +1,49 @@
+# Bash Scripts Manager Configuration
+# YAML format for better readability and extensibility
+
+version: "2.0"
+settings:
+  bin_dir: "bin"
+  startup_dir: "startup"
+  tools_dir: "tools"
+  auto_apply: false
+  enable_fzf_ui: true
+scripts:
+  startup:
+    - name: "proxy"
+      description: "Open clash port proxy"
+      path: "clash_proxy/proxy.sh"
+      enabled: true
+      category: "networking"
+    - name: "hello"
+      description: "Print Hello World"
+      path: "hello_world/hello.sh"
+      enabled: false
+      category: "examples"
+  tools:
+    - name: "syncf"
+      aliases: ["syncf", "sf"]
+      description: "Auto packer up and unpack everything by files"
+      path: "sync_files/syncf.sh"
+      enabled: true
+      category: "file_management"
+    - name: "rwl"
+      aliases: ["rwl", "log"]
+      description: "Print every bash shell logs"
+      path: "log_scripts/run_with_log.sh"
+      enabled: true
+      category: "debugging"
+    - name: "cl_idtf"
+      aliases: ["cleanid", "clid"]
+      description: "Clean all identifier files"
+      path: "clean_identifier/clean_identifier.sh"
+      enabled: false
+      category: "cleaning"
+    - name: test_name
+      description: test_dsc
+      path: test_dir/test.sh
+      enabled: false
+      category: test
+      aliases:
+        - test
+        - test2
