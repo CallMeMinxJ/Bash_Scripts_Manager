@@ -19,14 +19,14 @@ show_help() {
     echo ""
     echo "文件列表格式说明:"
     echo "  1. 以'#'开头的行是注释"
-    echo "  2. 以'!'开头的行是排除规则(支持正则表达式)"
-    echo "  3. 支持类似gitignore的匹配规则:"
-    echo "     - *.txt      匹配所有txt文件"
-    echo "     - /dist      匹配名为dist的文件或目录"
-    echo "     - node_modules/ 匹配node_modules目录及其内容"
-    echo "     - *.log      匹配所有log文件"
-    echo "     - !*.txt     排除所有txt文件(优先于包含规则)"
-    echo "     - !/dist     排除名为dist的文件或目录"
+    echo "  2. 以'!'开头的行是排除规则(支持类gitignore模式)"
+    echo "  3. 支持的模式规则:"
+    echo "     - *.txt       匹配当前目录下的txt文件"
+    echo "     - **/*.txt    匹配所有子目录中的txt文件"
+    echo "     - /dist       只匹配根目录下的dist文件/目录"
+    echo "     - dir/        匹配dir目录及其所有内容"
+    echo "     - !*.log      排除所有log文件"
+    echo "     - !**/*.tmp   排除所有子目录中的tmp文件"
     echo ""
     echo "示例:"
     echo "  syncf -z filelist.txt myproject  # 打包filelist.txt中的文件"
@@ -48,7 +48,116 @@ list_files() {
     fi
 }
 
-# 检查路径是否匹配排除规则
+# 将gitignore模式转换为正则表达式
+pattern_to_regex() {
+    local pattern="$1"
+    
+    # 如果模式以!开头，去掉!并标记为排除
+    local exclude_flag=0
+    if [[ "$pattern" == \!* ]]; then
+        pattern="${pattern:1}"
+        exclude_flag=1
+    fi
+    
+    # 去除首尾空格
+    pattern="$(echo "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    
+    # 如果是空模式，返回
+    [ -z "$pattern" ] && return
+    
+    # 转义正则特殊字符（除了*和?）
+    pattern=$(echo "$pattern" | sed 's/\./\\./g; s/\[/\\[/g; s/\]/\\]/g; s/\+/\\+/g; s/\^/\\^/g; s/\$/\\$/g')
+    
+    # 处理特殊模式
+    local regex=""
+    
+    # 如果模式以/开头，表示从根目录开始匹配
+    if [[ "$pattern" == /* ]]; then
+        pattern="${pattern:1}"
+        regex="^"
+    else
+        regex="(^|/)"
+    fi
+    
+    # 将模式分割为多个部分
+    local parts=()
+    IFS='/' read -ra parts <<< "$pattern"
+    
+    for i in "${!parts[@]}"; do
+        local part="${parts[i]}"
+        
+        if [ $i -gt 0 ]; then
+            regex="${regex}/"
+        fi
+        
+        # 处理**通配符
+        if [ "$part" = "**" ]; then
+            regex="${regex}([^/]+/)*"
+            continue
+        fi
+        
+        # 处理普通的*和?
+        local processed_part=""
+        local len=${#part}
+        
+        for ((j=0; j<len; j++)); do
+            local char="${part:$j:1}"
+            
+            if [ "$char" = "*" ]; then
+                # 处理**
+                if [ $j -lt $((len-1)) ] && [ "${part:$((j+1)):1}" = "*" ]; then
+                    processed_part="${processed_part}.*"
+                    ((j++))  # 跳过第二个*
+                else
+                    # 单个*，不匹配/
+                    processed_part="${processed_part}[^/]*"
+                fi
+            elif [ "$char" = "?" ]; then
+                processed_part="${processed_part}[^/]"
+            else
+                processed_part="${processed_part}$char"
+            fi
+        done
+        
+        regex="${regex}${processed_part}"
+    done
+    
+    # 如果模式以/结尾，表示匹配目录
+    if [[ "$pattern" == */ ]]; then
+        regex="${regex}($|/.*)"
+    else
+        regex="${regex}$"
+    fi
+    
+    # 返回结果
+    if [ $exclude_flag -eq 1 ]; then
+        echo "!$regex"
+    else
+        echo "$regex"
+    fi
+}
+
+# 检查路径是否匹配模式
+match_pattern() {
+    local path="$1"
+    local pattern_regex="$2"
+    
+    # 处理排除标记
+    local exclude_flag=0
+    if [[ "$pattern_regex" == \!* ]]; then
+        pattern_regex="${pattern_regex:1}"
+        exclude_flag=1
+    fi
+    
+    # 检查是否匹配
+    if [[ "$path" =~ $pattern_regex ]]; then
+        return 0  # 匹配
+    else
+        return 1  # 不匹配
+    fi
+}
+
+# 检查路径是否应该排除
 should_exclude() {
     local path="$1"
     shift
@@ -60,29 +169,16 @@ should_exclude() {
             continue
         fi
         
-        # 将gitignore风格模式转换为find -path模式
-        local find_pattern="$pattern"
+        # 将模式转换为正则表达式
+        local regex_pattern=$(pattern_to_regex "$pattern")
         
-        # 处理目录匹配: 如果以/结尾，匹配目录及其内容
-        if [[ "$find_pattern" == */ ]]; then
-            find_pattern="${find_pattern}*"
-        fi
-        
-        # 处理以/开头的模式: 匹配从当前目录开始的路径
-        if [[ "$find_pattern" == /* ]]; then
-            find_pattern=".${find_pattern}"
-        fi
-        
-        # 处理通配符: 将*转换为find可识别的通配符
-        find_pattern=$(echo "$find_pattern" | sed 's/\*/[^\/]*/g')
-        
-        # 检查是否匹配
-        if [[ "$path" =~ $find_pattern ]] || [[ "$path" == "$pattern" ]]; then
-            return 0  # 匹配排除规则
+        # 检查匹配
+        if match_pattern "$path" "$regex_pattern"; then
+            return 0  # 应该排除
         fi
     done
     
-    return 1  # 不匹配任何排除规则
+    return 1  # 不应该排除
 }
 
 # 使用find命令收集文件，应用排除规则
@@ -92,7 +188,7 @@ collect_files_with_excludes() {
     local output_file="$3"
     
     # 读取文件列表，分离包含和排除规则
-    local include_items=()
+    local include_patterns=()
     local exclude_patterns=()
     
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -111,18 +207,18 @@ collect_files_with_excludes() {
                 exclude_patterns+=("$pattern")
             fi
         else
-            # 包含项目
-            local item="$line"
+            # 包含模式
+            local pattern="$line"
             # 移除可能的空格
-            item=$(echo "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [ -n "$item" ]; then
-                include_items+=("$item")
+            pattern=$(echo "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -n "$pattern" ]; then
+                include_patterns+=("$pattern")
             fi
         fi
     done < "$filelist"
     
-    # 如果没有包含项目，报错
-    if [ ${#include_items[@]} -eq 0 ]; then
+    # 如果没有包含模式，报错
+    if [ ${#include_patterns[@]} -eq 0 ]; then
         echo "错误: 文件列表中没有包含任何文件或目录"
         return 1
     fi
@@ -130,38 +226,85 @@ collect_files_with_excludes() {
     # 临时文件存储find结果
     local temp_filelist=$(mktemp)
     
-    # 处理每个包含项目
-    for item in "${include_items[@]}"; do
-        # 检查项目是否存在
-        if [ ! -e "$item" ]; then
-            echo "警告: 路径 '$item' 不存在，跳过"
-            continue
+    # 处理每个包含模式
+    for pattern in "${include_patterns[@]}"; do
+        # 将模式转换为正则表达式
+        local regex_pattern=$(pattern_to_regex "$pattern")
+        
+        # 判断是否是排除模式
+        local is_exclude=0
+        if [[ "$regex_pattern" == \!* ]]; then
+            regex_pattern="${regex_pattern:1}"
+            is_exclude=1
         fi
         
-        if [ -d "$item" ]; then
-            # 对于目录，使用find获取所有文件
-            find "$item" -type f | while read -r file; do
-                # 获取相对于基础目录的路径
-                local rel_path="${file#$base_dir/}"
-                
-                # 检查是否应该排除
-                if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
-                    continue
-                fi
-                
-                # 记录文件
-                echo "$rel_path" >> "$temp_filelist"
-            done
-        else
-            # 对于单个文件
-            local rel_path="${item#$base_dir/}"
+        # 如果模式以/结尾，表示是目录模式
+        if [[ "$pattern" == */ ]]; then
+            # 去掉结尾的/
+            local dir_pattern="${pattern%/}"
             
-            # 检查是否应该排除
-            if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
-                continue
+            # 处理目录模式
+            if [ -d "$dir_pattern" ]; then
+                # 使用find查找目录下的所有文件
+                find "$dir_pattern" -type f 2>/dev/null | while read -r file; do
+                    # 获取相对于基础目录的路径
+                    local rel_path="${file#$base_dir/}"
+                    
+                    # 跳过空路径
+                    [ -z "$rel_path" ] && continue
+                    
+                    # 检查是否应该排除
+                    if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
+                        continue
+                    fi
+                    
+                    # 记录文件
+                    echo "$rel_path" >> "$temp_filelist"
+                done
             fi
-            
-            echo "$rel_path" >> "$temp_filelist"
+        elif [[ "$pattern" == /* ]]; then
+            # 以/开头的模式，匹配根目录
+            local file_path="${pattern:1}"
+            if [ -e "$file_path" ]; then
+                if [ -d "$file_path" ]; then
+                    find "$file_path" -type f 2>/dev/null | while read -r file; do
+                        local rel_path="${file#$base_dir/}"
+                        [ -z "$rel_path" ] && continue
+                        
+                        if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
+                            continue
+                        fi
+                        echo "$rel_path" >> "$temp_filelist"
+                    done
+                else
+                    local rel_path="${file_path#$base_dir/}"
+                    [ -z "$rel_path" ] && continue
+                    
+                    if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
+                        continue
+                    fi
+                    echo "$rel_path" >> "$temp_filelist"
+                fi
+            fi
+        else
+            # 使用find查找所有文件，然后用模式匹配
+            find . -type f 2>/dev/null | while read -r file; do
+                # 获取相对于基础目录的路径
+                local rel_path="${file#./}"
+                
+                # 跳过空路径
+                [ -z "$rel_path" ] && continue
+                
+                # 检查是否匹配包含模式
+                if match_pattern "$rel_path" "$regex_pattern"; then
+                    # 检查是否应该排除
+                    if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
+                        continue
+                    fi
+                    
+                    echo "$rel_path" >> "$temp_filelist"
+                fi
+            done
         fi
     done
     
@@ -198,7 +341,7 @@ pack_files() {
     echo "├─ 工作目录: $(pwd)"
     echo "├─ 文件列表: $abs_filelist"
     echo "├─ 包名称: $package"
-    echo "├─ 解析排除规则..."
+    echo "├─ 解析包含/排除规则..."
     
     # 创建新的文件列表，应用排除规则
     local processed_files=0
