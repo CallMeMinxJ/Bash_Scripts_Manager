@@ -12,10 +12,21 @@ show_help() {
     echo "syncf - 服务器与本地文件同步工具"
     echo "用法:"
     echo "  syncf -z <filelist> <name>      : 打包文件/文件夹到同步目录"
-    echo "  syncf -zg <name>                : 自动打包git改动文件
+    echo "  syncf -zg <name>                : 自动打包git改动文件"
     echo "  syncf -uz <package>             : 解包并同步文件到本地"
     echo "  syncf -l                        : 列出同步目录中的文件"
     echo "  syncf -h                        : 显示帮助信息"
+    echo ""
+    echo "文件列表格式说明:"
+    echo "  1. 以'#'开头的行是注释"
+    echo "  2. 以'!'开头的行是排除规则(支持正则表达式)"
+    echo "  3. 支持类似gitignore的匹配规则:"
+    echo "     - *.txt      匹配所有txt文件"
+    echo "     - /dist      匹配名为dist的文件或目录"
+    echo "     - node_modules/ 匹配node_modules目录及其内容"
+    echo "     - *.log      匹配所有log文件"
+    echo "     - !*.txt     排除所有txt文件(优先于包含规则)"
+    echo "     - !/dist     排除名为dist的文件或目录"
     echo ""
     echo "示例:"
     echo "  syncf -z filelist.txt myproject  # 打包filelist.txt中的文件"
@@ -35,6 +46,132 @@ list_files() {
     else
         ls -lh "$SYNC_DIR" | grep -v '^total' | grep -v '.tmp'
     fi
+}
+
+# 检查路径是否匹配排除规则
+should_exclude() {
+    local path="$1"
+    shift
+    local exclude_patterns=("$@")
+    
+    for pattern in "${exclude_patterns[@]}"; do
+        # 跳过空模式
+        if [ -z "$pattern" ]; then
+            continue
+        fi
+        
+        # 将gitignore风格模式转换为find -path模式
+        local find_pattern="$pattern"
+        
+        # 处理目录匹配: 如果以/结尾，匹配目录及其内容
+        if [[ "$find_pattern" == */ ]]; then
+            find_pattern="${find_pattern}*"
+        fi
+        
+        # 处理以/开头的模式: 匹配从当前目录开始的路径
+        if [[ "$find_pattern" == /* ]]; then
+            find_pattern=".${find_pattern}"
+        fi
+        
+        # 处理通配符: 将*转换为find可识别的通配符
+        find_pattern=$(echo "$find_pattern" | sed 's/\*/[^\/]*/g')
+        
+        # 检查是否匹配
+        if [[ "$path" =~ $find_pattern ]] || [[ "$path" == "$pattern" ]]; then
+            return 0  # 匹配排除规则
+        fi
+    done
+    
+    return 1  # 不匹配任何排除规则
+}
+
+# 使用find命令收集文件，应用排除规则
+collect_files_with_excludes() {
+    local base_dir="$1"
+    local filelist="$2"
+    local output_file="$3"
+    
+    # 读取文件列表，分离包含和排除规则
+    local include_items=()
+    local exclude_patterns=()
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # 跳过空行和注释行
+        if [[ -z "$line" || "$line" == \#* ]]; then
+            continue
+        fi
+        
+        # 排除规则以!开头
+        if [[ "$line" == \!* ]]; then
+            # 去掉开头的!，保留剩余部分作为排除模式
+            local pattern="${line:1}"
+            # 移除可能的空格
+            pattern=$(echo "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -n "$pattern" ]; then
+                exclude_patterns+=("$pattern")
+            fi
+        else
+            # 包含项目
+            local item="$line"
+            # 移除可能的空格
+            item=$(echo "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -n "$item" ]; then
+                include_items+=("$item")
+            fi
+        fi
+    done < "$filelist"
+    
+    # 如果没有包含项目，报错
+    if [ ${#include_items[@]} -eq 0 ]; then
+        echo "错误: 文件列表中没有包含任何文件或目录"
+        return 1
+    fi
+    
+    # 临时文件存储find结果
+    local temp_filelist=$(mktemp)
+    
+    # 处理每个包含项目
+    for item in "${include_items[@]}"; do
+        # 检查项目是否存在
+        if [ ! -e "$item" ]; then
+            echo "警告: 路径 '$item' 不存在，跳过"
+            continue
+        fi
+        
+        if [ -d "$item" ]; then
+            # 对于目录，使用find获取所有文件
+            find "$item" -type f | while read -r file; do
+                # 获取相对于基础目录的路径
+                local rel_path="${file#$base_dir/}"
+                
+                # 检查是否应该排除
+                if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
+                    continue
+                fi
+                
+                # 记录文件
+                echo "$rel_path" >> "$temp_filelist"
+            done
+        else
+            # 对于单个文件
+            local rel_path="${item#$base_dir/}"
+            
+            # 检查是否应该排除
+            if should_exclude "$rel_path" "${exclude_patterns[@]}"; then
+                continue
+            fi
+            
+            echo "$rel_path" >> "$temp_filelist"
+        fi
+    done
+    
+    # 去重排序
+    sort -u "$temp_filelist" > "$output_file"
+    
+    # 清理临时文件
+    rm -f "$temp_filelist"
+    
+    return 0
 }
 
 # 打包文件
@@ -61,52 +198,53 @@ pack_files() {
     echo "├─ 工作目录: $(pwd)"
     echo "├─ 文件列表: $abs_filelist"
     echo "├─ 包名称: $package"
+    echo "├─ 解析排除规则..."
     
-    # 创建新的文件列表
+    # 创建新的文件列表，应用排除规则
     local processed_files=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        # 跳过空行和注释行
-        if [[ -z "$line" || "$line" == \#* ]]; then
-            continue
-        fi
-        
-        # 处理相对路径
-        local item=$(realpath -s --relative-to="$(pwd)" "$line" 2>/dev/null)
-        
-        if [ -z "$item" ]; then
-            echo "警告: 跳过无效路径 '$line'"
-            continue
-        fi
-        
-        # 检查文件/目录是否存在
-        if [ ! -e "$item" ]; then
-            echo "警告: 路径 '$item' 不存在，跳过"
-            continue
-        fi
-        
-        # 复制文件到临时目录
-        local dest_dir="$files_dir/$(dirname "$item")"
-        mkdir -p "$dest_dir"
-        
-        if [ -d "$item" ]; then
-            echo "├─ 添加目录: $item"
-            cp -r "$item" "$dest_dir/"
-            # 记录目录中的所有文件
-            find "$item" -type f -print >> "$temp_work_dir/$new_filelist"
-            processed_files=$((processed_files + $(find "$item" -type f | wc -l)))
-        else
-            echo "├─ 添加文件: $item"
-            cp -r "$item" "$dest_dir/"
-            echo "$item" >> "$temp_work_dir/$new_filelist"
-            processed_files=$((processed_files + 1))
-        fi
-    done < "$abs_filelist"
+    local temp_new_filelist=$(mktemp)
+    
+    if ! collect_files_with_excludes "$(pwd)" "$abs_filelist" "$temp_new_filelist"; then
+        echo "错误: 收集文件失败"
+        rm -rf "$temp_work_dir"
+        rm -f "$temp_new_filelist"
+        exit 1
+    fi
+    
+    # 统计文件数量
+    processed_files=$(wc -l < "$temp_new_filelist")
     
     if [ $processed_files -eq 0 ]; then
         echo "错误: 没有找到有效的文件进行打包"
         rm -rf "$temp_work_dir"
+        rm -f "$temp_new_filelist"
         exit 1
     fi
+    
+    echo "├─ 找到 $processed_files 个文件"
+    echo "├─ 复制文件..."
+    
+    # 读取文件列表并复制文件
+    while IFS= read -r rel_path || [[ -n "$rel_path" ]]; do
+        if [ -z "$rel_path" ]; then
+            continue
+        fi
+        
+        local src="$rel_path"
+        local dest="$files_dir/$rel_path"
+        local dest_dir=$(dirname "$dest")
+        
+        # 确保目标目录存在
+        mkdir -p "$dest_dir"
+        
+        if [ -f "$src" ]; then
+            echo "│   ├─ 添加文件: $rel_path"
+            cp -r "$src" "$dest"
+        fi
+    done < "$temp_new_filelist"
+    
+    # 将文件列表移到临时工作目录
+    mv "$temp_new_filelist" "$temp_work_dir/$new_filelist"
     
     # 创建压缩包
     echo "├─ 创建压缩包..."
@@ -236,7 +374,7 @@ case $1 in
         pack_files "$2" "$3"
         ;;
     -zg)
-        if [$# -ne 2]; then
+        if [ $# -ne 2 ]; then
             echo "用法: syncf -zg <name>"
             exit 1
         fi

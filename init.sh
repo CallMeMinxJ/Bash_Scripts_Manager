@@ -69,9 +69,9 @@ cleanup_bashrc() {
     fi
     
     # 备份
-    local backup_file="$BASHRC_FILE.bak.$(date +%Y%m%d%H%M%S)"
-    cp "$BASHRC_FILE" "$backup_file" 2>/dev/null || true
-    log_info "备份创建: $backup_file"
+    # local backup_file="$BASHRC_FILE.bak.$(date +%Y%m%d%H%M%S)"
+    # cp "$BASHRC_FILE" "$backup_file" 2>/dev/null || true
+    # log_info "备份创建: $backup_file"
     
     # 移除旧配置
     if grep -q "# Added by Bash Scripts Manager" "$BASHRC_FILE" 2>/dev/null; then
