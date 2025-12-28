@@ -39,11 +39,3 @@ scripts:
       path: "clean_identifier/clean_identifier.sh"
       enabled: false
       category: "cleaning"
-    - name: test_name
-      description: test_dsc
-      path: test_dir/test.sh
-      enabled: false
-      category: test
-      aliases:
-        - test
-        - test2
